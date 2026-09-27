@@ -623,6 +623,61 @@ if {!$::tls} { ;# fake_redis_node doesn't support TLS
         file delete $tmpfile
     }
 
+    test_nontty_cli "JSONL output is one JSON value per line" {
+        r set cli:jsonl value
+        assert_equal {"value"} [run_cli --jsonl get cli:jsonl]
+        assert_equal {"value"} [run_cli --ndjson get cli:jsonl]
+        assert_equal {"value"} [run_cli -2 --jsonl get cli:jsonl]
+        set info [run_cli --jsonl info]
+        assert {[string index $info 0] eq "\""}
+
+        set output [run_cli --jsonl -r 3 ping]
+        set lines [split $output "\n"]
+        assert_equal 3 [llength $lines]
+        foreach line $lines {assert_equal {"PONG"} $line}
+
+        set error [run_cli --jsonl command-that-does-not-exist]
+        assert_match {\{"error":"ERR unknown command*} $error
+    }
+
+    test_nontty_cli "Watch mode repeats a command until interrupted" {
+        set cmdline [rediscli [srv host] [srv port] \
+            [list --jsonl --watch 0.05 ping]]
+        set fd [open "|$cmdline" r]
+        fconfigure $fd -buffering none -blocking false -translation binary
+        set output ""
+        set deadline [expr {[clock milliseconds] + 3000}]
+        while {[clock milliseconds] < $deadline && \
+               [llength [split [string trim $output] "\n"]] < 2} {
+            append output [read $fd]
+            after 10
+        }
+        set child [lindex [pid $fd] 0]
+        catch {exec kill -INT $child}
+        catch {close $fd}
+
+        set lines [split [string trim $output] "\n"]
+        assert {[llength $lines] >= 2}
+        foreach line [lrange $lines 0 1] {assert_equal {"PONG"} $line}
+    }
+
+    test_nontty_cli "Command timeout limits command reply wait" {
+        set cmdline [rediscli [srv host] [srv port] \
+            [list --command-timeout 0.05 blpop cli:timeout 1]]
+        set started [clock milliseconds]
+        catch {exec {*}$cmdline} output
+        set elapsed [expr {[clock milliseconds] - $started}]
+        assert_match {*command timeout*} $output
+        assert {$elapsed < 500}
+    }
+
+    test_nontty_cli "Help lists the new CLI options" {
+        set help [exec src/redis-cli --help]
+        assert_match {*--watch*} $help
+        assert_match {*--jsonl*} $help
+        assert_match {*--command-timeout*} $help
+    }
+
     test_nontty_cli "Latency mode reports requested percentiles" {
         # Single-shot --latency in CSV mode samples for one second then exits.
         # Without percentiles the line is "min,max,avg,count" (4 fields); with

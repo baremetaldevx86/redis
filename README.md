@@ -151,6 +151,21 @@ redis> incr mycounter
 redis>
 ```
 
+For continuously monitoring a command, use `--watch` with a fractional interval:
+
+```sh
+redis-cli --watch 1 INFO memory
+redis-cli --jsonl --watch 0.5 GET current-value
+```
+
+`--jsonl` emits one complete JSON value per line, which is suitable for
+streaming tools. `--command-timeout` sets the socket I/O timeout while the
+CLI waits for a command reply; `0` disables the command timeout.
+
+```sh
+redis-cli --command-timeout 2 BLPOP queue 0
+```
+
 ### Using Redis with Redis Insight
 
 For a more visual and user-friendly experience, use [Redis Insight](https://redis.io/docs/latest/develop/tools/insight/) - a tool that lets you explore data, design, develop, and optimize your applications while also serving as a platform for Redis education and onboarding. Redis Insight integrates [Redis Copilot](https://redis.io/chat), a natural language AI assistant that improves the experience when working with data and commands.
@@ -491,6 +506,11 @@ redis-cli MGETTTL session:123 missing-key
 # 2) 1) (nil)
 #    2) (integer) -2
 ```
+
+A runnable Express example using `MGETTTL` for opaque, expiring browser sessions
+lives in [`examples/expiring-sessions`](examples/expiring-sessions). It includes a
+live expiry dashboard, protected endpoint, logout, and atomic renewal bounded by
+an absolute session lifetime.
 
 ### Running Redis with the Query Engine and optional proprietary Intel SVS-VAMANA optimisations
 

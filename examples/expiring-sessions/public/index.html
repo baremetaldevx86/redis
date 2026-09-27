@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="A browser dashboard for an expiring session service">
+    <title>Expiring Session Service</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to main content</a>
+    <header class="site-header">
+      <div class="page-width">
+        <p class="eyebrow">Session service demo</p>
+        <h1>Expiring Session Service</h1>
+        <p class="lede">Sign in to watch an HTTP-only session expire, renew it safely, or call a protected action.</p>
+      </div>
+    </header>
+
+    <main id="main-content" class="page-width">
+      <section id="login-card" class="card" aria-labelledby="login-heading">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Demo login</p>
+            <h2 id="login-heading">Start a session</h2>
+          </div>
+        </div>
+        <p class="muted">This example uses a demo identity. The session token is kept in a secure cookie and is never shown in this page.</p>
+        <form id="login-form" novalidate>
+          <div class="form-grid">
+            <div class="field">
+              <label for="user-id">User ID</label>
+              <input id="user-id" name="userId" type="text" value="demo-user" autocomplete="username" required maxlength="128">
+            </div>
+            <div class="field">
+              <label for="device-label">Device label</label>
+              <input id="device-label" name="deviceLabel" type="text" value="Browser demo" autocomplete="off" maxlength="128">
+            </div>
+          </div>
+          <button id="login-button" class="button button-primary" type="submit">Sign in</button>
+          <p id="login-error" class="message message-error" role="alert" hidden></p>
+        </form>
+      </section>
+
+      <section id="session-card" class="card" aria-labelledby="session-heading" hidden>
+        <div class="section-heading session-heading">
+          <div>
+            <p class="eyebrow">Current session</p>
+            <h2 id="session-heading">Session details</h2>
+          </div>
+          <span id="session-status-badge" class="status-badge" data-state="signed-out">Signed out</span>
+        </div>
+
+        <p id="session-status-message" class="status-message" role="status" aria-live="polite">Sign in to begin.</p>
+
+        <dl class="session-details">
+          <div>
+            <dt>User</dt>
+            <dd id="session-user">—</dd>
+          </div>
+          <div>
+            <dt>Device</dt>
+            <dd id="session-device">—</dd>
+          </div>
+          <div>
+            <dt>Created</dt>
+            <dd id="session-created">—</dd>
+          </div>
+          <div>
+            <dt>Absolute expiry</dt>
+            <dd id="session-absolute-expiry">—</dd>
+          </div>
+        </dl>
+
+        <div class="expiry-panel" aria-labelledby="expiry-heading">
+          <div class="expiry-label-row">
+            <h3 id="expiry-heading">Idle timeout</h3>
+            <strong id="countdown">—</strong>
+          </div>
+          <progress id="expiry-progress" max="100" value="0" aria-label="Session time remaining" aria-valuetext="No active session"></progress>
+          <p id="expiry-help" class="muted">The countdown is refreshed from the service periodically. Refreshing does not renew the session.</p>
+        </div>
+
+        <div class="actions" aria-label="Session actions">
+          <button id="protected-button" class="button button-primary" type="button" disabled>Call protected action</button>
+          <button id="renew-button" class="button button-secondary" type="button" disabled>Renew session</button>
+          <button id="logout-button" class="button button-danger" type="button" disabled>Log out</button>
+        </div>
+        <p id="action-result" class="message" role="status" aria-live="polite"></p>
+      </section>
+
+      <aside class="service-status card" aria-labelledby="service-status-heading">
+        <div class="section-heading compact-heading">
+          <h2 id="service-status-heading">Service status</h2>
+          <span id="service-status-badge" class="status-badge" data-state="unknown">Unknown</span>
+        </div>
+        <p id="service-status-message" class="muted" role="status" aria-live="polite">Waiting for the session service.</p>
+      </aside>
+
+      <noscript>
+        <p class="message message-error">JavaScript is required for this dashboard. Enable it and reload the page.</p>
+      </noscript>
+    </main>
+
+    <footer class="site-footer">
+      <div class="page-width">
+        <p>All session operations are performed against the local example API.</p>
+      </div>
+    </footer>
+  </body>
+</html>

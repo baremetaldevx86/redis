@@ -1,0 +1,19 @@
+{
+  "name": "redis-expiring-session-service",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A small Express service demonstrating expiring Redis-backed sessions",
+  "main": "server.js",
+  "scripts": {
+    "start": "node scripts/start.cjs",
+    "dev": "node scripts/dev.cjs",
+    "test": "node scripts/test.cjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "redis": "^4.7.0"
+  }
+}

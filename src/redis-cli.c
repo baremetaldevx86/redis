@@ -54,6 +54,7 @@
 #define OUTPUT_CSV 2
 #define OUTPUT_JSON 3
 #define OUTPUT_QUOTED_JSON 4
+#define OUTPUT_JSONL 5
 #define REDIS_CLI_KEEPALIVE_INTERVAL 15 /* seconds */
 #define REDIS_CLI_DEFAULT_PIPE_TIMEOUT 30 /* seconds */
 #define REDIS_CLI_HISTFILE_ENV "REDISCLI_HISTFILE"
@@ -206,7 +207,9 @@ static struct config {
     int tls;
     cliSSLconfig sslconfig;
     long repeat;
+    int repeat_set;
     long interval;
+    int interval_set;
     int dbnum; /* db num currently selected */
     int interactive;
     int shutdown;
@@ -255,6 +258,10 @@ static struct config {
     int quoted_input;   /* Force input args to be treated as quoted strings */
     int output; /* output mode, see OUTPUT_* defines */
     int push_output; /* Should we display spontaneous PUSH replies */
+    int watch_mode; /* Repeat a command until interrupted (or -r is exhausted). */
+    struct timeval watch_interval;
+    int command_timeout_set;
+    struct timeval command_timeout;
     sds mb_delim;
     sds cmd_delim;
     char prompt[128];
@@ -291,6 +298,7 @@ static volatile sig_atomic_t force_cancel_loop = 0;
 static void usage(int err);
 static void slaveMode(int send_sync);
 static int cliConnect(int flags);
+static int cliCommandTimedOut(redisContext *c);
 
 static char *getInfoField(char *info, char *field);
 static long getLongInfoField(char *info, char *field);
@@ -1706,6 +1714,16 @@ static int cliSetName(void) {
     return result;
 }
 
+static int cliSetCommandTimeout(redisContext *c) {
+    if (!config.command_timeout_set) return REDIS_OK;
+    if (redisSetTimeout(c, config.command_timeout) == REDIS_ERR) {
+        fprintf(stderr, "Could not set command timeout: %s\n",
+                c->errstr[0] ? c->errstr : "unknown error");
+        return REDIS_ERR;
+    }
+    return REDIS_OK;
+}
+
 /* Connect to the server. It is possible to pass certain flags to the function:
  *      CC_FORCE: The connection is performed even if there is already
  *                a connected socket.
@@ -1729,10 +1747,18 @@ static int cliConnect(int flags) {
             context = redisConnectUnixWrapper(config.hostsocket, config.connect_timeout);
         }
 
+        if (!context->err && cliSetCommandTimeout(context) != REDIS_OK) {
+            redisFree(context);
+            context = NULL;
+            return REDIS_ERR;
+        }
+
         if (!context->err && config.tls) {
             const char *err = NULL;
-            if (cliSecureConnection(context, config.sslconfig, &err) == REDIS_ERR && err) {
-                fprintf(stderr, "Could not negotiate a TLS connection: %s\n", err);
+            if (cliSecureConnection(context, config.sslconfig, &err) == REDIS_ERR) {
+                if (err) fprintf(stderr, "Could not negotiate a TLS connection: %s\n", err);
+                else if (cliCommandTimedOut(context)) fprintf(stderr, "Error: command timeout\n");
+                else fprintf(stderr, "Could not negotiate a TLS connection.\n");
                 redisFree(context);
                 context = NULL;
                 return REDIS_ERR;
@@ -1809,9 +1835,21 @@ static int cliSendAsking(void) {
     return result;
 }
 
+static int cliCommandTimedOut(redisContext *c) {
+    return config.command_timeout_set &&
+           (config.command_timeout.tv_sec || config.command_timeout.tv_usec) &&
+           c != NULL && (c->flags & REDIS_BLOCK) &&
+           (c->err == REDIS_ERR_TIMEOUT ||
+            (c->err == REDIS_ERR_IO &&
+             (errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT)));
+}
+
 static void cliPrintContextError(void) {
     if (context == NULL) return;
-    fprintf(stderr,"Error: %s\n",context->errstr);
+    if (cliCommandTimedOut(context))
+        fprintf(stderr,"Error: command timeout\n");
+    else
+        fprintf(stderr,"Error: %s\n",context->errstr);
 }
 
 static int isInvalidateReply(redisReply *reply) {
@@ -2160,7 +2198,7 @@ static sds cliFormatReplyCSV(redisReply *r) {
 /* Append specified buffer to out and return it, using required JSON output
  * mode. */
 static sds jsonStringOutput(sds out, const char *p, int len, int mode) {
-    if (mode == OUTPUT_JSON) {
+    if (mode == OUTPUT_JSON || mode == OUTPUT_JSONL) {
         return escapeJsonString(out, p, len);
     } else if (mode == OUTPUT_QUOTED_JSON) {
         /* Need to double-quote backslashes */
@@ -2185,8 +2223,16 @@ static sds cliFormatReplyJson(sds out, redisReply *r, int mode) {
 
     switch (r->type) {
     case REDIS_REPLY_ERROR:
-        out = sdscat(out,"error:");
-        out = jsonStringOutput(out,r->str,strlen(r->str),mode);
+        if (mode == OUTPUT_JSONL) {
+            /* Keep each JSONL record valid JSON, including errors. */
+            out = sdscat(out,"{\"error\":");
+            out = jsonStringOutput(out,r->str,r->len,mode);
+            out = sdscat(out,"}");
+        } else {
+            /* Preserve the existing --json error representation. */
+            out = sdscat(out,"error:");
+            out = jsonStringOutput(out,r->str,r->len,mode);
+        }
         break;
     case REDIS_REPLY_STATUS:
         out = jsonStringOutput(out,r->str,r->len,mode);
@@ -2255,7 +2301,7 @@ static sds cliFormatReplyJson(sds out, redisReply *r, int mode) {
 static sds cliFormatReply(redisReply *reply, int mode, int verbatim) {
     sds out;
 
-    if (verbatim) {
+    if (verbatim && mode != OUTPUT_JSONL) {
         out = cliFormatReplyRaw(reply);
     }  else if (mode == OUTPUT_STANDARD) {
         out = cliFormatReplyTTY(reply, "");
@@ -2265,7 +2311,8 @@ static sds cliFormatReply(redisReply *reply, int mode, int verbatim) {
     } else if (mode == OUTPUT_CSV) {
         out = cliFormatReplyCSV(reply);
         out = sdscatlen(out, "\n", 1);
-    } else if (mode == OUTPUT_JSON || mode == OUTPUT_QUOTED_JSON) {
+    } else if (mode == OUTPUT_JSON || mode == OUTPUT_QUOTED_JSON ||
+               mode == OUTPUT_JSONL) {
         out = cliFormatReplyJson(sdsempty(), reply, mode);
         out = sdscatlen(out, "\n", 1);
     } else {
@@ -2288,6 +2335,7 @@ static void cliPushHandler(void *privdata, void *reply) {
     }
 
     fwrite(out, sdslen(out), 1, stdout);
+    if (config.output == OUTPUT_JSONL) fflush(stdout);
 
     freeReplyObject(reply);
     sdsfree(out);
@@ -2305,6 +2353,7 @@ static int cliReadReply(int output_raw_strings) {
     }
 
     if (redisGetReply(context,&_reply) != REDIS_OK) {
+        if (config.watch_mode && force_cancel_loop) return REDIS_OK;
         if (config.blocking_state_aborted) {
             config.blocking_state_aborted = 0;
             config.monitor_mode = 0;
@@ -2312,7 +2361,7 @@ static int cliReadReply(int output_raw_strings) {
             return cliConnect(CC_FORCE);
         }
 
-        if (config.shutdown) {
+        if (config.shutdown && !cliCommandTimedOut(context)) {
             redisFree(context);
             context = NULL;
             return REDIS_OK;
@@ -2388,7 +2437,7 @@ static int cliReadReply(int output_raw_strings) {
 
 /* Simultaneously wait for pubsub messages from redis and input on stdin. */
 static void cliWaitForMessagesOrStdin(void) {
-    int show_info = config.output != OUTPUT_RAW && (isatty(STDOUT_FILENO) ||
+    int show_info = config.output != OUTPUT_RAW && config.output != OUTPUT_JSONL && (isatty(STDOUT_FILENO) ||
                                                     getenv("FAKETTY"));
     int use_color = show_info && isColorTerm();
     cliPressAnyKeyTTY();
@@ -2451,6 +2500,26 @@ static void cliWaitForMessagesOrStdin(void) {
     cliRestoreTTY();
 }
 
+static void cliWatchRefresh(void) {
+    /* Keep JSONL and redirected output stream-friendly. Only redraw a real
+     * terminal when using the human-readable formatter. */
+    if (config.watch_mode && config.output == OUTPUT_STANDARD &&
+        isatty(STDOUT_FILENO))
+    {
+        printf("\033[H\033[2J");
+        fflush(stdout);
+    }
+}
+
+static void cliWatchSigIntHandler(int signal_number) {
+    UNUSED(signal_number);
+    force_cancel_loop = 1;
+    if (context) {
+        close(context->fd);
+        context->fd = REDIS_INVALID_FD;
+    }
+}
+
 static int cliSendCommand(int argc, char **argv, long repeat) {
     char *command = argv[0];
     size_t *argvlen;
@@ -2496,8 +2565,13 @@ static int cliSendCommand(int argc, char **argv, long repeat) {
     int is_unsubscribe = (!strcasecmp(command, "unsubscribe") ||
                           !strcasecmp(command, "punsubscribe") ||
                           !strcasecmp(command, "sunsubscribe"));
-    if (!strcasecmp(command,"sync") ||
-        !strcasecmp(command,"psync")) config.slave_mode = 1;
+    if (!strcasecmp(command,"sync") || !strcasecmp(command,"psync")) {
+        if (config.output == OUTPUT_JSONL) {
+            fprintf(stderr, "--jsonl does not support replication streams.\n");
+            return REDIS_ERR;
+        }
+        config.slave_mode = 1;
+    }
 
     /* When the user manually calls SCRIPT DEBUG, setup the activation of
      * debugging mode on the next eval if needed. */
@@ -2524,7 +2598,8 @@ static int cliSendCommand(int argc, char **argv, long repeat) {
 
     /* Negative repeat is allowed and causes infinite loop,
        works well with the interval option. */
-    while(repeat < 0 || repeat-- > 0) {
+    while(!force_cancel_loop && (repeat < 0 || repeat-- > 0)) {
+        cliWatchRefresh();
         redisAppendCommandArgv(context,argc,(const char**)argv,argvlen);
 
         if (config.monitor_mode) {
@@ -2649,7 +2724,7 @@ static int cliSendCommand(int argc, char **argv, long repeat) {
                further 'repeat' number of dud interactions */
             break;
         }
-        if (config.interval) usleep(config.interval);
+        if (!force_cancel_loop && config.interval) usleep(config.interval);
         fflush(stdout); /* Make it grep friendly */
     }
 
@@ -2665,7 +2740,11 @@ static redisReply *reconnectingRedisCommand(redisContext *c, const char *fmt, ..
 
     assert(!c->err);
     while(reply == NULL) {
-        while (c->err & (REDIS_ERR_IO | REDIS_ERR_EOF)) {
+        if (cliCommandTimedOut(c)) {
+            fprintf(stderr,"Error: command timeout\n");
+            exit(1);
+        }
+        while (c->err == REDIS_ERR_IO || c->err == REDIS_ERR_EOF) {
             printf("\r\x1b[0K"); /* Cursor to left edge + clear line. */
             printf("Reconnecting... %d\r", ++tries);
             fflush(stdout);
@@ -2673,10 +2752,14 @@ static redisReply *reconnectingRedisCommand(redisContext *c, const char *fmt, ..
             redisFree(c);
             c = redisConnectWrapper(config.conn_info.hostip, config.conn_info.hostport,
                                     config.connect_timeout);
+            if (!c->err && cliSetCommandTimeout(c) != REDIS_OK)
+                exit(1);
             if (!c->err && config.tls) {
                 const char *err = NULL;
-                if (cliSecureConnection(c, config.sslconfig, &err) == REDIS_ERR && err) {
-                    fprintf(stderr, "TLS Error: %s\n", err);
+                if (cliSecureConnection(c, config.sslconfig, &err) == REDIS_ERR) {
+                    if (err) fprintf(stderr, "TLS Error: %s\n", err);
+                    else if (cliCommandTimedOut(c)) fprintf(stderr, "Error: command timeout\n");
+                    else fprintf(stderr, "TLS Error.\n");
                     exit(1);
                 }
             }
@@ -2687,7 +2770,12 @@ static redisReply *reconnectingRedisCommand(redisContext *c, const char *fmt, ..
         reply = redisvCommand(c,fmt,ap);
         va_end(ap);
 
-        if (c->err && !(c->err & (REDIS_ERR_IO | REDIS_ERR_EOF))) {
+        /* A timed-out write may have executed. Never reconnect and resend it. */
+        if (cliCommandTimedOut(c)) {
+            fprintf(stderr,"Error: command timeout\n");
+            exit(1);
+        }
+        if (c->err && c->err != REDIS_ERR_IO && c->err != REDIS_ERR_EOF) {
             fprintf(stderr, "Error: %s\n", c->errstr);
             exit(1);
         } else if (tries > 0) {
@@ -2702,6 +2790,25 @@ static redisReply *reconnectingRedisCommand(redisContext *c, const char *fmt, ..
 /*------------------------------------------------------------------------------
  * User interface
  *--------------------------------------------------------------------------- */
+
+/* Parse new duration options without overflowing timeval fields. Keep a
+ * portable upper bound (also on 32-bit builds), and reject positive durations
+ * below one microsecond rather than silently turning them into "no timeout". */
+static struct timeval cliParseDuration(const char *arg, const char *option, int allow_zero) {
+    char *end;
+    errno = 0;
+    double seconds = strtod(arg, &end);
+    if (end == arg || *end != '\0' || errno == ERANGE || !isfinite(seconds) ||
+        seconds < 0 || seconds > INT_MAX ||
+        (seconds == 0 && !allow_zero) || (seconds > 0 && seconds < 0.000001))
+    {
+        fprintf(stderr, "Invalid duration for %s: '%s'.\n", option, arg);
+        exit(1);
+    }
+    long long usec = (long long)(seconds * 1000000);
+    struct timeval tv = {usec / 1000000, usec % 1000000};
+    return tv;
+}
 
 static int parseOptions(int argc, char **argv) {
     int i;
@@ -2736,13 +2843,21 @@ static int parseOptions(int argc, char **argv) {
             }
             config.connect_timeout.tv_sec = (long long)seconds;
             config.connect_timeout.tv_usec = ((long long)(seconds * 1000000)) % 1000000;
+        } else if (!strcmp(argv[i],"--command-timeout") && !lastarg) {
+            config.command_timeout = cliParseDuration(argv[++i], "--command-timeout", 1);
+            config.command_timeout_set = 1;
         } else if (!strcmp(argv[i],"-s") && !lastarg) {
             config.hostsocket = argv[++i];
         } else if (!strcmp(argv[i],"-r") && !lastarg) {
             config.repeat = strtoll(argv[++i],NULL,10);
+            config.repeat_set = 1;
         } else if (!strcmp(argv[i],"-i") && !lastarg) {
             double seconds = atof(argv[++i]);
             config.interval = seconds*1000000;
+            config.interval_set = 1;
+        } else if (!strcmp(argv[i],"--watch") && !lastarg) {
+            config.watch_interval = cliParseDuration(argv[++i], "--watch", 0);
+            config.watch_mode = 1;
         } else if (!strcmp(argv[i],"-n") && !lastarg) {
             config.conn_info.input_dbnum = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--no-auth-warning")) {
@@ -2777,6 +2892,12 @@ static int parseOptions(int argc, char **argv) {
                 config.resp3 = 2;
             }
             config.output = OUTPUT_JSON;
+        } else if (!strcmp(argv[i],"--jsonl") || !strcmp(argv[i],"--ndjson")) {
+            /* JSON Lines is one complete JSON value per output line. */
+            if (config.resp3 == 0) {
+                config.resp3 = 2;
+            }
+            config.output = OUTPUT_JSONL;
         } else if (!strcmp(argv[i],"--quoted-json")) {
             /* Not overwrite explicit value by -3*/
             if (config.resp3 == 0) {
@@ -3212,6 +3333,9 @@ static void usage(int err) {
 "  -p <port>          Server port (default: 6379).\n"
 "  -t <timeout>       Server connection timeout in seconds (decimals allowed).\n"
 "                     Default timeout is 0, meaning no limit, depending on the OS.\n"
+"  --command-timeout <timeout>\n"
+"                     Socket I/O timeout while waiting for a command reply.\n"
+"                     Decimals are allowed; 0 means no limit.\n"
 "  -s <socket>        Server socket (overrides hostname and port).\n"
 "  -a <password>      Password to use when connecting to the server.\n"
 "                     You can also use the " REDIS_CLI_AUTH_ENV " environment\n"
@@ -3229,6 +3353,9 @@ static void usage(int err) {
 "  -r <repeat>        Execute specified command N times.\n"
 "  -i <interval>      When -r is used, waits <interval> seconds per command.\n"
 "                     It is possible to specify sub-second times like -i 0.1.\n"
+"  --watch <interval> Repeatedly execute the command at this interval.\n"
+"                     The interval is in seconds and may be fractional; runs until\n"
+"                     interrupted unless -r is also supplied.\n"
 "                     This interval is also used in --scan and --stat per cycle.\n"
 "                     and in --bigkeys, --memkeys, --keystats, and --hotkeys per 100 cycles.\n"
 "  -n <db>            Database number.\n"
@@ -3250,6 +3377,8 @@ static void usage(int err) {
 "  --quoted-input     Force input to be handled as quoted strings.\n"
 "  --csv              Output in CSV format.\n"
 "  --json             Output in JSON format (default RESP3, use -2 if you want to use with RESP2).\n"
+"  --jsonl            Output one complete JSON value per line (alias: --ndjson;\n"
+"                     default RESP3, use -2 for RESP2).\n"
 "  --quoted-json      Same as --json, but produce ASCII-safe quoted strings, not Unicode.\n"
 "  --show-pushes <yn> Whether to print RESP3 PUSH messages.  Enabled by default when\n"
 "                     STDOUT is a tty but can be overridden with --show-pushes no.\n"
@@ -4314,10 +4443,17 @@ cleanup:
 static int clusterManagerNodeConnect(clusterManagerNode *node) {
     if (node->context) redisFree(node->context);
     node->context = redisConnectWrapper(node->ip, node->port, config.connect_timeout);
+    if (!node->context->err && cliSetCommandTimeout(node->context) != REDIS_OK) {
+        redisFree(node->context);
+        node->context = NULL;
+        return 0;
+    }
     if (!node->context->err && config.tls) {
         const char *err = NULL;
-        if (cliSecureConnection(node->context, config.sslconfig, &err) == REDIS_ERR && err) {
-            fprintf(stderr,"TLS Error: %s\n", err);
+        if (cliSecureConnection(node->context, config.sslconfig, &err) == REDIS_ERR) {
+            if (err) fprintf(stderr,"TLS Error: %s\n", err);
+            else if (cliCommandTimedOut(node->context)) fprintf(stderr, "Error: command timeout\n");
+            else fprintf(stderr,"TLS Error.\n");
             redisFree(node->context);
             node->context = NULL;
             return 0;
@@ -8420,6 +8556,10 @@ static int clusterManagerCommandImport(int argc, char **argv) {
                 src_port, src_ctx->errstr);
         goto cleanup;
     }
+    if (cliSetCommandTimeout(src_ctx) != REDIS_OK) {
+        success = 0;
+        goto cleanup;
+    }
     // Auth for the source node. 
     char *from_user = config.cluster_manager_command.from_user;
     char *from_pass = config.cluster_manager_command.from_pass;
@@ -8755,7 +8895,7 @@ static void latencyModePrint(long long min, long long max, double avg,
         for (int j = 0; j < npct && histogram; j++)
             printf(" %.3f", hdr_value_at_percentile(histogram, config.latency_percentiles[j])/1000.0);
         printf("\n");
-    } else if (config.output == OUTPUT_JSON) {
+    } else if (config.output == OUTPUT_JSON || config.output == OUTPUT_JSONL) {
         printf("{\"min\": %.3f, \"max\": %.3f, \"avg\": %.3f, \"count\": %lld",
                 min_ms, max_ms, avg_ms, count);
         if (npct > 0 && histogram) {
@@ -11309,6 +11449,14 @@ int main(int argc, char **argv) {
     config.hostsocket = NULL;
     config.repeat = 1;
     config.interval = 0;
+    config.watch_mode = 0;
+    config.watch_interval.tv_sec = 0;
+    config.watch_interval.tv_usec = 0;
+    config.repeat_set = 0;
+    config.interval_set = 0;
+    config.command_timeout_set = 0;
+    config.command_timeout.tv_sec = 0;
+    config.command_timeout.tv_usec = 0;
     config.dbnum = 0;
     config.conn_info.input_dbnum = 0;
     config.interactive = 0;
@@ -11405,6 +11553,50 @@ int main(int argc, char **argv) {
     firstarg = parseOptions(argc,argv);
     argc -= firstarg;
     argv += firstarg;
+
+    int special_mode = CLUSTER_MANAGER_MODE() || config.latency_mode ||
+        config.latency_dist_mode || config.vset_recall_mode || config.slave_mode ||
+        config.getrdb_mode || config.get_functions_rdb_mode || config.pipe_mode ||
+        config.bigkeys || config.memkeys || config.keystats || config.hotkeys ||
+        config.stat_mode || config.scan_mode || config.lru_test_mode ||
+        config.intrinsic_latency_mode || config.test_hint || config.test_hint_file;
+    int watch_stream_command = argc > 0 &&
+        (!strcasecmp(argv[0], "monitor") ||
+         !strcasecmp(argv[0], "subscribe") ||
+         !strcasecmp(argv[0], "psubscribe") ||
+         !strcasecmp(argv[0], "ssubscribe") ||
+         !strcasecmp(argv[0], "sync") ||
+         !strcasecmp(argv[0], "psync"));
+
+    if (config.watch_mode) {
+        if (argc == 0 || config.eval || special_mode || watch_stream_command ||
+            config.interval_set) {
+            fprintf(stderr, "--watch requires a command and cannot be combined with -i, --eval or special modes.\n");
+            return 1;
+        }
+        if (config.watch_interval.tv_sec > LONG_MAX / 1000000L ||
+            (config.watch_interval.tv_sec == LONG_MAX / 1000000L &&
+             config.watch_interval.tv_usec > LONG_MAX % 1000000L)) {
+            fprintf(stderr, "--watch interval is too large.\n");
+            return 1;
+        }
+        config.interval = (long)(config.watch_interval.tv_sec * 1000000L +
+                                 config.watch_interval.tv_usec);
+        if (!config.repeat_set) config.repeat = -1;
+    }
+    /* These modes write their own reports rather than formatting replies.
+     * Single-shot latency can produce one JSONL record, but history adds a
+     * human-readable separator between windows. */
+    int jsonl_special_mode = special_mode && !config.latency_mode;
+    if (config.output == OUTPUT_JSONL &&
+        (jsonl_special_mode || config.eval_ldb || config.latency_history)) {
+        fprintf(stderr, "--jsonl supports command replies and single-shot latency output only.\n");
+        return 1;
+    }
+    if (config.command_timeout_set && config.pipe_mode) {
+        fprintf(stderr, "--command-timeout cannot be used with --pipe; use --pipe-timeout instead.\n");
+        return 1;
+    }
 
     parseEnv();
 
@@ -11553,6 +11745,7 @@ int main(int argc, char **argv) {
         redisFree(context);
         return res;
     } else {
+        if (config.watch_mode) signal(SIGINT, cliWatchSigIntHandler);
         cliConnect(CC_QUIET);
         int res = noninteractive(argc,argv);
         redisFree(context);
