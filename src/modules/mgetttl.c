@@ -1,5 +1,8 @@
 /* MGETTTL module -- fetch string values and their remaining TTLs.
  *
+ * MGETTTL preserves compact string encodings while replying, unlike
+ * StringDMA, which decodes encoded values even for read-only DMA access.
+ *
  * MGETTTL returns one two-element array for each requested key:
  *   [value, remaining_ttl_ms]
  *
@@ -27,27 +30,12 @@ int MGetTTL_RedisCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc
     RedisModule_ReplyWithArray(ctx, argc - 1);
     for (int i = 1; i < argc; i++) {
         RedisModuleKey *key = RedisModule_OpenKey(ctx, argv[i], REDISMODULE_READ);
-        int key_type = RedisModule_KeyType(key);
+        mstime_t ttl = RedisModule_KeyType(key) == REDISMODULE_KEYTYPE_EMPTY ?
+                      -2 : RedisModule_GetExpire(key);
 
         RedisModule_ReplyWithArray(ctx, 2);
-        if (key_type == REDISMODULE_KEYTYPE_EMPTY) {
-            RedisModule_ReplyWithNull(ctx);
-            RedisModule_ReplyWithLongLong(ctx, -2);
-        } else {
-            if (key_type == REDISMODULE_KEYTYPE_STRING) {
-                size_t value_len;
-                char *value = RedisModule_StringDMA(key, &value_len, REDISMODULE_READ);
-                if (value != NULL) {
-                    RedisModule_ReplyWithStringBuffer(ctx, value, value_len);
-                } else {
-                    RedisModule_ReplyWithNull(ctx);
-                }
-            } else {
-                RedisModule_ReplyWithNull(ctx);
-            }
-
-            RedisModule_ReplyWithLongLong(ctx, RedisModule_GetExpire(key));
-        }
+        RedisModule_ReplyWithKeyString(ctx, key);
+        RedisModule_ReplyWithLongLong(ctx, ttl);
 
         RedisModule_CloseKey(key);
     }
@@ -61,6 +49,12 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
 
     if (RedisModule_Init(ctx, "mgetttl", 1, REDISMODULE_APIVER_1) == REDISMODULE_ERR)
         return REDISMODULE_ERR;
+
+    /* Fail at load time on servers without the encoding-preserving reply API. */
+    if (RedisModule_ReplyWithKeyString == NULL) {
+        RedisModule_Log(ctx, "warning", "MGETTTL requires RedisModule_ReplyWithKeyString; rebuild Redis from this checkout");
+        return REDISMODULE_ERR;
+    }
 
     if (RedisModule_CreateCommand(ctx, "mgetttl", MGetTTL_RedisCommand,
         "readonly", 1, -1, 1) == REDISMODULE_ERR)

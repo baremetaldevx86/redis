@@ -21,6 +21,7 @@ fi
 $MAKE -C tests/modules && \
 $TCLSH tests/test_helper.tcl \
 --single unit/moduleapi/commandfilter \
+--single unit/moduleapi/mgetttl \
 --single unit/moduleapi/basics \
 --single unit/moduleapi/fork \
 --single unit/moduleapi/testrdb \

@@ -43,6 +43,7 @@ endif
 
 TEST_MODULES = \
     commandfilter.so \
+    mgetttl.so \
     basics.so \
     testrdb.so \
     fork.so \
@@ -97,6 +98,9 @@ all: $(TEST_MODULES)
 
 32bit:
 	$(MAKE) CFLAGS="-m32" LDFLAGS="-m32"
+
+mgetttl.xo: ../../src/modules/mgetttl.c ../../src/redismodule.h
+	$(CC) -I../../src $(CFLAGS) $(SHOBJ_CFLAGS) -fPIC -c ../../src/modules/mgetttl.c -o $@
 
 %.xo: %.c ../../src/redismodule.h
 	$(CC) -I../../src $(CFLAGS) $(SHOBJ_CFLAGS) -fPIC -c $< -o $@

@@ -3498,6 +3498,28 @@ int RM_ReplyWithString(RedisModuleCtx *ctx, RedisModuleString *str) {
     return REDISMODULE_OK;
 }
 
+/* Reply with the string value of a key opened with RedisModule_OpenKey().
+ * The reply is a binary-safe bulk string, including for integer-encoded values.
+ * Unlike RedisModule_StringDMA(), this function does not decode or replace the
+ * stored value, preserving integer and embedded-string encodings.
+ *
+ * A NULL handle, an empty key, or a non-string value produces a NULL reply,
+ * matching MGET semantics. The key handle can be closed immediately afterward.
+ *
+ * The function always returns REDISMODULE_OK. */
+int RM_ReplyWithKeyString(RedisModuleCtx *ctx, RedisModuleKey *key) {
+    client *c = moduleGetReplyClient(ctx);
+    if (c == NULL) return REDISMODULE_OK;
+    if (key == NULL || key->kv == NULL || key->kv->type != OBJ_STRING) {
+        addReplyNull(c);
+        return REDISMODULE_OK;
+    }
+    /* Copy the reply: the module may already hold a writable StringDMA pointer
+     * and modify it after this call, without going through a key-writing API. */
+    addReplyBulkWithFlag(c, key->kv, 0);
+    return REDISMODULE_OK;
+}
+
 /* Reply with an empty string.
  *
  * The function always returns REDISMODULE_OK. */
@@ -15750,6 +15772,7 @@ void moduleRegisterCoreAPI(void) {
     REGISTER_API(ReleaseKeyMetaClass);
     REGISTER_API(ReplySetAttributeLength);
     REGISTER_API(ReplyWithString);
+    REGISTER_API(ReplyWithKeyString);
     REGISTER_API(ReplyWithEmptyString);
     REGISTER_API(ReplyWithVerbatimString);
     REGISTER_API(ReplyWithVerbatimStringType);

@@ -472,9 +472,11 @@ It returns one `[value, remaining TTL in milliseconds]` pair per requested key.
 Missing keys return a NULL value and `-2`; keys without an expiry return `-1`.
 Non-string keys return a NULL value, following `MGET` behavior.
 
-Build and load the module with:
+The command preserves string encodings and uses this checkout's
+`RedisModule_ReplyWithKeyString` API. Rebuild the server as well as the module:
 
 ```sh
+make build redis
 make -C src/modules mgetttl.so
 ./src/redis-server --loadmodule ./src/modules/mgetttl.so
 ```
