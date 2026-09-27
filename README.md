@@ -465,6 +465,31 @@ make V=1
 
 Please consult the [TLS.md](TLS.md) file for more information on how to use Redis with TLS.
 
+### Example module: MGETTTL
+
+This checkout includes a small example module that adds an `MGETTTL` command.
+It returns one `[value, remaining TTL in milliseconds]` pair per requested key.
+Missing keys return a NULL value and `-2`; keys without an expiry return `-1`.
+Non-string keys return a NULL value, following `MGET` behavior.
+
+Build and load the module with:
+
+```sh
+make -C src/modules mgetttl.so
+./src/redis-server --loadmodule ./src/modules/mgetttl.so
+```
+
+For example:
+
+```sh
+redis-cli SET session:123 user-42 EX 60
+redis-cli MGETTTL session:123 missing-key
+# 1) 1) "user-42"
+#    2) (integer) 59999
+# 2) 1) (nil)
+#    2) (integer) -2
+```
+
 ### Running Redis with the Query Engine and optional proprietary Intel SVS-VAMANA optimisations
 
 **License Disclaimer**
